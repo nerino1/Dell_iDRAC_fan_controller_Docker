@@ -7,11 +7,15 @@ function apply_Dell_default_fan_control_profile() {
 }
 
 # This function applies a user-specified static fan control profile
+# Optional argument $1: decimal fan speed to use (defaults to $DECIMAL_FAN_SPEED)
 function apply_user_fan_control_profile() {
+  local TARGET_DECIMAL_SPEED="${1:-$DECIMAL_FAN_SPEED}"
+  local TARGET_HEX_SPEED
+  TARGET_HEX_SPEED=$(convert_decimal_value_to_hexadecimal "$TARGET_DECIMAL_SPEED")
   # Use ipmitool to send the raw command to set fan control to user-specified value
   ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x01 0x00 > /dev/null
-  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x02 0xff $HEXADECIMAL_FAN_SPEED > /dev/null
-  CURRENT_FAN_CONTROL_PROFILE="User static fan control profile ($DECIMAL_FAN_SPEED%)"
+  ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0x30 0x02 0xff $TARGET_HEX_SPEED > /dev/null
+  CURRENT_FAN_CONTROL_PROFILE="User static fan control profile ($TARGET_DECIMAL_SPEED%)"
 }
 
 # Convert first parameter given ($DECIMAL_NUMBER) to hexadecimal
@@ -219,6 +223,73 @@ function print_temperature_array_line() {
 
   printf " %5s°C  %40s  %51s  %s\n" "$LOCAL_EXHAUST_TEMPERATURE" "$LOCAL_CURRENT_FAN_CONTROL_PROFILE" "$LOCAL_THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS" "$LOCAL_COMMENT"
 }
+
+# ---------------------------------------------------------------------------
+# STEPPED FAN CURVE
+# Requires env vars:
+#   FAN_SPEED                        - baseline fan % (low / cool)
+#   STEPPED_MID_TEMP                 - °C to switch to mid speed
+#   STEPPED_MID_FAN_SPEED            - fan % at mid stage
+#   STEPPED_HIGH_TEMP                - °C to switch to high speed
+#   STEPPED_HIGH_FAN_SPEED           - fan % at high stage
+#   CPU_TEMPERATURE_THRESHOLD        - °C to hand back to Dell
+#
+# Returns: sets CURRENT_FAN_CONTROL_PROFILE and applies the correct speed
+# ---------------------------------------------------------------------------
+function apply_stepped_fan_curve() {
+  local -r CPU_TEMP="$1"   # highest CPU temp to evaluate
+
+  if [ "$CPU_TEMP" -ge "$CPU_TEMPERATURE_THRESHOLD" ]; then
+    apply_Dell_default_fan_control_profile
+  elif [ "$CPU_TEMP" -ge "$STEPPED_HIGH_TEMP" ]; then
+    apply_user_fan_control_profile "$STEPPED_HIGH_FAN_SPEED"
+    CURRENT_FAN_CONTROL_PROFILE="Stepped fan curve - High stage ($STEPPED_HIGH_FAN_SPEED% @ ${CPU_TEMP}°C)"
+  elif [ "$CPU_TEMP" -ge "$STEPPED_MID_TEMP" ]; then
+    apply_user_fan_control_profile "$STEPPED_MID_FAN_SPEED"
+    CURRENT_FAN_CONTROL_PROFILE="Stepped fan curve - Mid stage ($STEPPED_MID_FAN_SPEED% @ ${CPU_TEMP}°C)"
+  else
+    apply_user_fan_control_profile "$DECIMAL_FAN_SPEED"
+    CURRENT_FAN_CONTROL_PROFILE="Stepped fan curve - Low stage ($DECIMAL_FAN_SPEED% @ ${CPU_TEMP}°C)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# LINEAR INTERPOLATION FAN CURVE
+# Requires env vars:
+#   FAN_SPEED                        - minimum fan % (below INTERP_LOW_TEMP)
+#   INTERP_LOW_TEMP                  - °C where ramping begins
+#   INTERP_HIGH_TEMP                 - °C where ramping ends (= CPU_TEMPERATURE_THRESHOLD)
+#   INTERP_HIGH_FAN_SPEED            - maximum fan % at INTERP_HIGH_TEMP
+#   CPU_TEMPERATURE_THRESHOLD        - °C to hand back to Dell
+#
+# Between INTERP_LOW_TEMP and INTERP_HIGH_TEMP the fan speed is linearly
+# interpolated: speed = LOW + (HIGH-LOW) * (temp-LOW_TEMP)/(HIGH_TEMP-LOW_TEMP)
+# ---------------------------------------------------------------------------
+function apply_interpolated_fan_curve() {
+  local -r CPU_TEMP="$1"
+
+  if [ "$CPU_TEMP" -ge "$CPU_TEMPERATURE_THRESHOLD" ]; then
+    apply_Dell_default_fan_control_profile
+  elif [ "$CPU_TEMP" -ge "$INTERP_LOW_TEMP" ]; then
+    # Integer arithmetic: multiply by 100 to preserve one decimal place then round
+    local -r RANGE_TEMP=$(( INTERP_HIGH_TEMP - INTERP_LOW_TEMP ))
+    local -r RANGE_SPEED=$(( INTERP_HIGH_FAN_SPEED - DECIMAL_FAN_SPEED ))
+    local -r OFFSET=$(( CPU_TEMP - INTERP_LOW_TEMP ))
+    # Rounded integer division: (a + b/2) / b
+    local -r INTERPOLATED_SPEED=$(( DECIMAL_FAN_SPEED + (RANGE_SPEED * OFFSET * 100 / RANGE_TEMP + 50) / 100 ))
+    apply_user_fan_control_profile "$INTERPOLATED_SPEED"
+    CURRENT_FAN_CONTROL_PROFILE="Interpolated fan curve ($INTERPOLATED_SPEED% @ ${CPU_TEMP}°C)"
+  else
+    apply_user_fan_control_profile "$DECIMAL_FAN_SPEED"
+    CURRENT_FAN_CONTROL_PROFILE="Interpolated fan curve - Min ($DECIMAL_FAN_SPEED% @ ${CPU_TEMP}°C)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# OVERHEATING checks — these now test against CPU_TEMPERATURE_THRESHOLD for
+# both modes. In stepped/interpolation modes the threshold is used as the
+# Dell hand-back point, handled inside the curve functions above.
+# ---------------------------------------------------------------------------
 
 # Define functions to check if CPU 1 and CPU 2 temperatures are above the threshold
 function CPU1_OVERHEATING() { [ $CPU1_TEMPERATURE -gt "$CPU_TEMPERATURE_THRESHOLD" ]; }
