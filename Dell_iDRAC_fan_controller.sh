@@ -10,11 +10,18 @@ source constants.sh
 # Trap the signals for container exit and run graceful_exit function
 trap 'graceful_exit' SIGINT SIGQUIT SIGTERM
 
-# Prepare, format and define initial variables
+# ---------------------------------------------------------------------------
+# FAN CONTROL MODE
+# Set FAN_CONTROL_MODE to one of:
+#   standard    - original single-threshold behaviour (default)
+#   stepped     - 3-stage stepped curve
+#   interpolate - smooth linear ramp between two temp points
+# ---------------------------------------------------------------------------
+FAN_CONTROL_MODE="${FAN_CONTROL_MODE:-standard}"
 
-# readonly DELL_FRESH_AIR_COMPLIANCE=45
-
-# Check if FAN_SPEED variable is in hexadecimal format. If not, convert it to hexadecimal
+# ---------------------------------------------------------------------------
+# Validate and convert FAN_SPEED (baseline / minimum speed)
+# ---------------------------------------------------------------------------
 if [[ "$FAN_SPEED" == 0x* ]]; then
   readonly DECIMAL_FAN_SPEED=$(convert_hexadecimal_value_to_decimal "$FAN_SPEED")
   readonly HEXADECIMAL_FAN_SPEED="$FAN_SPEED"
@@ -23,6 +30,25 @@ else
   readonly HEXADECIMAL_FAN_SPEED=$(convert_decimal_value_to_hexadecimal "$FAN_SPEED")
 fi
 
+# ---------------------------------------------------------------------------
+# Validate mode-specific env vars
+# ---------------------------------------------------------------------------
+if [[ "$FAN_CONTROL_MODE" == "stepped" ]]; then
+  : "${STEPPED_MID_TEMP:?  ERROR: STEPPED_MID_TEMP must be set for stepped mode}"
+  : "${STEPPED_MID_FAN_SPEED:?  ERROR: STEPPED_MID_FAN_SPEED must be set for stepped mode}"
+  : "${STEPPED_HIGH_TEMP:?  ERROR: STEPPED_HIGH_TEMP must be set for stepped mode}"
+  : "${STEPPED_HIGH_FAN_SPEED:?  ERROR: STEPPED_HIGH_FAN_SPEED must be set for stepped mode}"
+fi
+
+if [[ "$FAN_CONTROL_MODE" == "interpolate" ]]; then
+  : "${INTERP_LOW_TEMP:?  ERROR: INTERP_LOW_TEMP must be set for interpolate mode}"
+  : "${INTERP_HIGH_TEMP:?  ERROR: INTERP_HIGH_TEMP must be set for interpolate mode}"
+  : "${INTERP_HIGH_FAN_SPEED:?  ERROR: INTERP_HIGH_FAN_SPEED must be set for interpolate mode}"
+fi
+
+# ---------------------------------------------------------------------------
+# Connect to iDRAC
+# ---------------------------------------------------------------------------
 set_iDRAC_login_string "$IDRAC_HOST" "$IDRAC_USERNAME" "$IDRAC_PASSWORD"
 
 get_Dell_server_model
@@ -42,25 +68,44 @@ else
   readonly CPU2_TEMPERATURE_INDEX=2
 fi
 
-# Log main informations
+# ---------------------------------------------------------------------------
+# Startup log
+# ---------------------------------------------------------------------------
 echo "Server model: $SERVER_MANUFACTURER $SERVER_MODEL"
 echo "iDRAC/IPMI host: $IDRAC_HOST"
+echo "Fan control mode: $FAN_CONTROL_MODE"
 
-# Log the fan speed objective, CPU temperature threshold and check interval
-echo "Fan speed objective: $DECIMAL_FAN_SPEED%"
-echo "CPU temperature threshold: "$CPU_TEMPERATURE_THRESHOLD"°C"
+case "$FAN_CONTROL_MODE" in
+  stepped)
+    echo "  Baseline fan speed : $DECIMAL_FAN_SPEED%"
+    echo "  Mid stage          : >= ${STEPPED_MID_TEMP}C -> ${STEPPED_MID_FAN_SPEED}%"
+    echo "  High stage         : >= ${STEPPED_HIGH_TEMP}C -> ${STEPPED_HIGH_FAN_SPEED}%"
+    echo "  Dell hand-back     : >= ${CPU_TEMPERATURE_THRESHOLD}C"
+    ;;
+  interpolate)
+    echo "  Minimum fan speed  : $DECIMAL_FAN_SPEED% (below ${INTERP_LOW_TEMP}C)"
+    echo "  Ramp start         : ${INTERP_LOW_TEMP}C"
+    echo "  Ramp end / max     : ${INTERP_HIGH_TEMP}C -> ${INTERP_HIGH_FAN_SPEED}%"
+    echo "  Dell hand-back     : >= ${CPU_TEMPERATURE_THRESHOLD}C"
+    ;;
+  *)
+    echo "  Fan speed objective       : $DECIMAL_FAN_SPEED%"
+    echo "  CPU temperature threshold : ${CPU_TEMPERATURE_THRESHOLD}C"
+    ;;
+esac
+
 echo "Check interval: ${CHECK_INTERVAL}s"
 echo ""
 
+# ---------------------------------------------------------------------------
+# Initialise state
+# ---------------------------------------------------------------------------
 TABLE_HEADER_PRINT_COUNTER=$TABLE_HEADER_PRINT_INTERVAL
-# Set the flag used to check if the active fan control profile has changed
 IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
-
-# Check present sensors
 IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT=true
 IS_CPU2_TEMPERATURE_SENSOR_PRESENT=true
 
-# Start timer in background
+# Start first timer in background
 sleep "$CHECK_INTERVAL" &
 SLEEP_PROCESS_PID=$!
 
@@ -74,56 +119,90 @@ if [ -z "$CPU2_TEMPERATURE" ]; then
   echo "No CPU2 temperature sensor detected."
   IS_CPU2_TEMPERATURE_SENSOR_PRESENT=false
 fi
-# Output new line to beautify output if one of the previous conditions have echoed
 if ! $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT || ! $IS_CPU2_TEMPERATURE_SENSOR_PRESENT; then
   echo ""
 fi
 
-#readonly NUMBER_OF_DETECTED_CPUS=(${CPUS_TEMPERATURES//;/ })
-# TODO : write "X CPU sensors detected." and remove previous ifs
 readonly HEADER=$(build_header $NUMBER_OF_DETECTED_CPUS)
 
-# Start monitoring
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
 while true; do
-  # Initialize a variable to store the comments displayed when the fan control profile changed
   COMMENT=" -"
-  # Check if CPU 1 is overheating then apply Dell default dynamic fan control profile if true
-  if CPU1_OVERHEATING; then
-    apply_Dell_default_fan_control_profile
 
-    if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
-      IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
-
-      # If CPU 2 temperature sensor is present, check if it is overheating too.
-      # Do not apply Dell default dynamic fan control profile as it has already been applied before
-      if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEATING; then
-        COMMENT="CPU 1 and CPU 2 temperatures are too high, Dell default dynamic fan control profile applied for safety"
-      else
-        COMMENT="CPU 1 temperature is too high, Dell default dynamic fan control profile applied for safety"
-      fi
-    fi
-  # If CPU 2 temperature sensor is present, check if it is overheating then apply Dell default dynamic fan control profile if true
-  elif $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEATING; then
-    apply_Dell_default_fan_control_profile
-
-    if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
-      IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
-      COMMENT="CPU 2 temperature is too high, Dell default dynamic fan control profile applied for safety"
+  # Pick the highest CPU temperature to drive the fan curve decisions
+  if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && [ "$CPU2_TEMPERATURE" != "-" ]; then
+    if [ "$CPU2_TEMPERATURE" -gt "$CPU1_TEMPERATURE" ]; then
+      MAX_CPU_TEMPERATURE=$CPU2_TEMPERATURE
+    else
+      MAX_CPU_TEMPERATURE=$CPU1_TEMPERATURE
     fi
   else
-    apply_user_fan_control_profile
-
-    # Check if user fan control profile is applied then apply it if not
-    if $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
-      IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=false
-      COMMENT="CPU temperature decreased and is now OK (<= $CPU_TEMPERATURE_THRESHOLD°C), user's fan control profile applied."
-    fi
+    MAX_CPU_TEMPERATURE=$CPU1_TEMPERATURE
   fi
 
-  # If server model is not Gen 14 (*40) or newer
+  case "$FAN_CONTROL_MODE" in
+    stepped)
+      apply_stepped_fan_curve "$MAX_CPU_TEMPERATURE"
+      if [[ "$CURRENT_FAN_CONTROL_PROFILE" == "Dell default dynamic fan control profile" ]]; then
+        if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
+          COMMENT="CPU temp >= ${CPU_TEMPERATURE_THRESHOLD}C, Dell default fan control applied for safety"
+        fi
+      else
+        if $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=false
+          COMMENT="CPU temp back within range, stepped fan curve active"
+        fi
+      fi
+      ;;
+
+    interpolate)
+      apply_interpolated_fan_curve "$MAX_CPU_TEMPERATURE"
+      if [[ "$CURRENT_FAN_CONTROL_PROFILE" == "Dell default dynamic fan control profile" ]]; then
+        if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
+          COMMENT="CPU temp >= ${CPU_TEMPERATURE_THRESHOLD}C, Dell default fan control applied for safety"
+        fi
+      else
+        if $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=false
+          COMMENT="CPU temp back within range, interpolated fan curve active"
+        fi
+      fi
+      ;;
+
+    *)
+      # Original standard mode — unchanged behaviour
+      if CPU1_OVERHEATING; then
+        apply_Dell_default_fan_control_profile
+        if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
+          if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEATING; then
+            COMMENT="CPU 1 and CPU 2 temperatures are too high, Dell default dynamic fan control profile applied for safety"
+          else
+            COMMENT="CPU 1 temperature is too high, Dell default dynamic fan control profile applied for safety"
+          fi
+        fi
+      elif $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && CPU2_OVERHEATING; then
+        apply_Dell_default_fan_control_profile
+        if ! $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=true
+          COMMENT="CPU 2 temperature is too high, Dell default dynamic fan control profile applied for safety"
+        fi
+      else
+        apply_user_fan_control_profile
+        if $IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED; then
+          IS_DELL_DEFAULT_FAN_CONTROL_PROFILE_APPLIED=false
+          COMMENT="CPU temperature decreased and is now OK (<= $CPU_TEMPERATURE_THRESHOLD C), user's fan control profile applied."
+        fi
+      fi
+      ;;
+  esac
+
+  # PCIe cooling response (Gen 13 and older only)
   if ! $DELL_POWEREDGE_GEN_14_OR_NEWER; then
-    # Enable or disable, depending on the user's choice, third-party PCIe card Dell default cooling response
-    # No comment will be displayed on the change of this parameter since it is not related to the temperature of any device (CPU, GPU, etc...) but only to the settings made by the user when launching this Docker container
     if "$DISABLE_THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE"; then
       disable_third_party_PCIe_card_Dell_default_cooling_response
       THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS="Disabled"
@@ -133,7 +212,7 @@ while true; do
     fi
   fi
 
-  # Print temperatures, active fan control profile and comment if any change happened during last time interval
+  # Print table header every N lines
   if [ $TABLE_HEADER_PRINT_COUNTER -eq $TABLE_HEADER_PRINT_INTERVAL ]; then
     printf "%s\n" "$HEADER"
     TABLE_HEADER_PRINT_COUNTER=0
@@ -143,7 +222,7 @@ while true; do
 
   wait $SLEEP_PROCESS_PID
 
-  # Start timer in background for next cycle
+  # Start next timer
   sleep "$CHECK_INTERVAL" &
   SLEEP_PROCESS_PID=$!
 
