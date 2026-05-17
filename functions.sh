@@ -77,6 +77,10 @@ function retrieve_temperatures() {
   CPU1_TEMPERATURE=$(echo $CPU_DATA | awk "{print \$$CPU1_TEMPERATURE_INDEX;}")
   if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT; then
     CPU2_TEMPERATURE=$(echo $CPU_DATA | awk "{print \$$CPU2_TEMPERATURE_INDEX;}")
+    # If awk returned empty (only 1 CPU installed), treat as not present
+    if ! [[ "$CPU2_TEMPERATURE" =~ ^[0-9]+$ ]]; then
+      CPU2_TEMPERATURE="-"
+    fi
   else
     CPU2_TEMPERATURE="-"
   fi
@@ -85,8 +89,8 @@ function retrieve_temperatures() {
   CPUS_TEMPERATURES="$CPU1_TEMPERATURE"
   NUMBER_OF_DETECTED_CPUS=1
 
-  # If CPU2 is present, parse its temperature data and add it to CPUS_TEMPERATURES
-  if [ -n "$CPU2_TEMPERATURE" ]; then
+  # If CPU2 is present and has a real numeric reading, add it to CPUS_TEMPERATURES
+  if [[ "$CPU2_TEMPERATURE" =~ ^[0-9]+$ ]]; then
     CPUS_TEMPERATURES+=";$CPU2_TEMPERATURE"
     ((NUMBER_OF_DETECTED_CPUS++))
   fi
@@ -218,7 +222,11 @@ function print_temperature_array_line() {
   printf "%19s  %3d°C " "$(date +"%d-%m-%Y %T")" $LOCAL_INLET_TEMPERATURE
   # Itération sur les températures dans le tableau
   for temperature in "${CPUs_temperatures_array[@]}"; do
-    printf " %3d°C " $temperature
+    if [[ "$temperature" == "-" ]]; then
+      printf "   -°C "
+    else
+      printf " %3d°C " $temperature
+    fi
   done
 
   printf " %5s°C  %40s  %51s  %s\n" "$LOCAL_EXHAUST_TEMPERATURE" "$LOCAL_CURRENT_FAN_CONTROL_PROFILE" "$LOCAL_THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS" "$LOCAL_COMMENT"
