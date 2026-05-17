@@ -19,8 +19,6 @@ function apply_user_fan_control_profile() {
 }
 
 # Convert first parameter given ($DECIMAL_NUMBER) to hexadecimal
-# Usage : convert_decimal_value_to_hexadecimal $DECIMAL_NUMBER
-# Returns : hexadecimal value of DECIMAL_NUMBER
 function convert_decimal_value_to_hexadecimal() {
   local -r DECIMAL_NUMBER=$1
   local -r HEXADECIMAL_NUMBER=$(printf '0x%02x' $DECIMAL_NUMBER)
@@ -28,8 +26,6 @@ function convert_decimal_value_to_hexadecimal() {
 }
 
 # Convert first parameter given ($HEXADECIMAL_NUMBER) to decimal
-# Usage : convert_hexadecimal_value_to_decimal "$HEXADECIMAL_NUMBER"
-# Returns : decimal value of HEXADECIMAL_NUMBER
 function convert_hexadecimal_value_to_decimal() {
   local -r HEXADECIMAL_NUMBER=$1
   local -r DECIMAL_NUMBER=$(printf '%d' $HEXADECIMAL_NUMBER)
@@ -37,8 +33,6 @@ function convert_hexadecimal_value_to_decimal() {
 }
 
 # Set the IDRAC_LOGIN_STRING variable based on connection type
-# Usage : set_iDRAC_login_string $IDRAC_HOST $IDRAC_USERNAME $IDRAC_PASSWORD
-# Returns : IDRAC_LOGIN_STRING
 function set_iDRAC_login_string() {
   local IDRAC_HOST="$1"
   local IDRAC_USERNAME="$2"
@@ -46,22 +40,18 @@ function set_iDRAC_login_string() {
 
   IDRAC_LOGIN_STRING=""
 
-  # Check if the iDRAC host is set to 'local' or not then set the IDRAC_LOGIN_STRING accordingly
   if [[ "$IDRAC_HOST" == "local" ]]; then
-    # Check that the Docker host IPMI device (the iDRAC) has been exposed to the Docker container
     if [ ! -e "/dev/ipmi0" ] && [ ! -e "/dev/ipmi/0" ] && [ ! -e "/dev/ipmidev/0" ]; then
       print_error_and_exit "Could not open device at /dev/ipmi0 or /dev/ipmi/0 or /dev/ipmidev/0, check that you added the device to your Docker container or stop using local mode"
     fi
     IDRAC_LOGIN_STRING='open'
   else
     echo "iDRAC/IPMI username: $IDRAC_USERNAME"
-    #echo "iDRAC/IPMI password: $IDRAC_PASSWORD"
     IDRAC_LOGIN_STRING="lanplus -H $IDRAC_HOST -U $IDRAC_USERNAME -P $IDRAC_PASSWORD"
   fi
 }
 
 # Retrieve temperature sensors data using ipmitool
-# Usage : retrieve_temperatures $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
 function retrieve_temperatures() {
   if (( $# != 2 )); then
     print_error "Illegal number of parameters.\nUsage: retrieve_temperatures \$IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT \$IS_CPU2_TEMPERATURE_SENSOR_PRESENT"
@@ -77,7 +67,6 @@ function retrieve_temperatures() {
   CPU1_TEMPERATURE=$(echo $CPU_DATA | awk "{print \$$CPU1_TEMPERATURE_INDEX;}")
   if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT; then
     CPU2_TEMPERATURE=$(echo $CPU_DATA | awk "{print \$$CPU2_TEMPERATURE_INDEX;}")
-    # If awk returned empty (only 1 CPU installed), treat as not present
     if ! [[ "$CPU2_TEMPERATURE" =~ ^[0-9]+$ ]]; then
       CPU2_TEMPERATURE="-"
     fi
@@ -85,20 +74,16 @@ function retrieve_temperatures() {
     CPU2_TEMPERATURE="-"
   fi
 
-  # Initialize CPUS_TEMPERATURES
   CPUS_TEMPERATURES="$CPU1_TEMPERATURE"
   NUMBER_OF_DETECTED_CPUS=1
 
-  # If CPU2 is present and has a real numeric reading, add it to CPUS_TEMPERATURES
   if [[ "$CPU2_TEMPERATURE" =~ ^[0-9]+$ ]]; then
     CPUS_TEMPERATURES+=";$CPU2_TEMPERATURE"
     ((NUMBER_OF_DETECTED_CPUS++))
   fi
 
-  # Parse inlet temperature data
   INLET_TEMPERATURE=$(echo "$DATA" | grep Inlet | grep -Po '\d{2}' | tail -1)
 
-  # If exhaust temperature sensor is present, parse its temperature data
   if $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT; then
     EXHAUST_TEMPERATURE=$(echo "$DATA" | grep Exhaust | grep -Po '\d{2}' | tail -1)
   else
@@ -108,38 +93,18 @@ function retrieve_temperatures() {
 
 # /!\ Use this function only for Gen 13 and older generation servers /!\
 function enable_third_party_PCIe_card_Dell_default_cooling_response() {
-  # We could check the current cooling response before applying but it's not very useful so let's skip the test and apply directly
   ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x00 0x00 0x00 > /dev/null
 }
 
 # /!\ Use this function only for Gen 13 and older generation servers /!\
 function disable_third_party_PCIe_card_Dell_default_cooling_response() {
-  # We could check the current cooling response before applying but it's not very useful so let's skip the test and apply directly
   ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x00 0x16 0x05 0x00 0x00 0x00 0x05 0x00 0x01 0x00 0x00 > /dev/null
 }
-
-# Returns :
-# - 0 if third-party PCIe card Dell default cooling response is currently DISABLED
-# - 1 if third-party PCIe card Dell default cooling response is currently ENABLED
-# - 2 if the current status returned by ipmitool command output is unexpected
-# function is_third_party_PCIe_card_Dell_default_cooling_response_disabled() {
-#   THIRD_PARTY_PCIE_CARD_COOLING_RESPONSE=$(ipmitool -I $IDRAC_LOGIN_STRING raw 0x30 0xce 0x01 0x16 0x05 0x00 0x00 0x00)
-
-#   if [ "$THIRD_PARTY_PCIE_CARD_COOLING_RESPONSE" == "16 05 00 00 00 05 00 01 00 00" ]; then
-#     return 0
-#   elif [ "$THIRD_PARTY_PCIE_CARD_COOLING_RESPONSE" == "16 05 00 00 00 05 00 00 00 00" ]; then
-#     return 1
-#   else
-#     print_error "Unexpected output: $THIRD_PARTY_PCIE_CARD_COOLING_RESPONSE"
-#     return 2
-#   fi
-# }
 
 # Prepare traps in case of container exit
 function graceful_exit() {
   apply_Dell_default_fan_control_profile
 
-  # Reset third-party PCIe card cooling response to Dell default depending on the user's choice at startup
   if ! "$KEEP_THIRD_PARTY_PCIE_CARD_COOLING_RESPONSE_STATE_ON_EXIT"; then
     enable_third_party_PCIe_card_Dell_default_cooling_response
   fi
@@ -147,26 +112,22 @@ function graceful_exit() {
   print_warning_and_exit "Container stopped, Dell default dynamic fan control profile applied for safety"
 }
 
-# Helps debugging when people are posting their output
 function get_Dell_server_model() {
-  local -r IPMI_FRU_content=$(ipmitool -I $IDRAC_LOGIN_STRING fru 2>/dev/null) # FRU stands for "Field Replaceable Unit"
+  local -r IPMI_FRU_content=$(ipmitool -I $IDRAC_LOGIN_STRING fru 2>/dev/null)
 
   SERVER_MANUFACTURER=$(echo "$IPMI_FRU_content" | grep "Product Manufacturer" | awk -F ': ' '{print $2}')
   SERVER_MODEL=$(echo "$IPMI_FRU_content" | grep "Product Name" | awk -F ': ' '{print $2}')
 
-  # Check if SERVER_MANUFACTURER is empty, if yes, assign value based on "Board Mfg"
   if [ -z "$SERVER_MANUFACTURER" ]; then
     SERVER_MANUFACTURER=$(echo "$IPMI_FRU_content" | tr -s ' ' | grep "Board Mfg :" | awk -F ': ' '{print $2}')
   fi
 
-  # Check if SERVER_MODEL is empty, if yes, assign value based on "Board Product"
   if [ -z "$SERVER_MODEL" ]; then
     SERVER_MODEL=$(echo "$IPMI_FRU_content" | tr -s ' ' | grep "Board Product :" | awk -F ': ' '{print $2}')
   fi
 }
 
 function build_header() {
-  # Check number of arguments
   if [ "$#" -ne 1 ]; then
     print_error "build_header() requires an argument (number_of_CPUs)"
     return 1
@@ -174,32 +135,25 @@ function build_header() {
 
   local -r number_of_CPUs="$1"
   local -r CPU_column_width=7
-  local -r Exhaust_column_width=9
+  local header="                     ----"
 
-  local header="                     ----" # Width ready for 1 CPU
-
-  # Calculate the number of dashes to add on each side of the title
   number_of_dashes=$(((number_of_CPUs-1)*CPU_column_width/2))
 
-  # Loop to add dashes
   for ((i=1; i<=number_of_dashes; i++)); do
     header+="-"
   done
 
   header+=" Temperatures ---"
 
-  # Check parity and add an extra dash on the right if odd
   if (( (number_of_CPUs - 1) * CPU_column_width % 2 != 0 )); then
     header+="-"
   fi
 
-  # Loop to add dashes
   for ((i=1; i<=number_of_dashes; i++)); do
     header+="-"
   done
   header+=$'\n    Date & time      Inlet  CPU 1 '
 
-  # Loop to add CPU columns
   for ((i=2; i<=number_of_CPUs; i++)); do
     header+=" CPU $i "
   done
@@ -216,11 +170,9 @@ function print_temperature_array_line() {
   local -r LOCAL_THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS="$5"
   local -r LOCAL_COMMENT="$6"
 
-  # Creating an array from the string
   local -r CPUs_temperatures_array=(${LOCAL_CPUS_TEMPERATURES//;/ })
 
   printf "%19s  %3d°C " "$(date +"%d-%m-%Y %T")" $LOCAL_INLET_TEMPERATURE
-  # Itération sur les températures dans le tableau
   for temperature in "${CPUs_temperatures_array[@]}"; do
     if [[ "$temperature" == "-" ]]; then
       printf "   -°C "
@@ -233,19 +185,50 @@ function print_temperature_array_line() {
 }
 
 # ---------------------------------------------------------------------------
+# LOG TO CSV
+# Appends a line to the CSV log file and prunes entries older than LOG_RETENTION_DAYS
+# ---------------------------------------------------------------------------
+function log_to_csv() {
+  local -r TIMESTAMP="$(date +"%Y-%m-%d %T")"
+  local -r LOG_FILE="${LOG_PATH:-/app/logs}/fan_controller.csv"
+  local -r RETENTION_DAYS="${LOG_RETENTION_DAYS:-365}"
+
+  # Create log dir and header if needed
+  mkdir -p "$(dirname "$LOG_FILE")"
+  if [ ! -f "$LOG_FILE" ]; then
+    echo "timestamp,inlet_temp,cpu1_temp,cpu2_temp,exhaust_temp,fan_profile,fan_speed_pct" > "$LOG_FILE"
+  fi
+
+  # Extract numeric fan speed from profile string e.g. "Stepped fan curve - Mid stage (15% @ 43°C)" -> 15
+  local FAN_SPEED_PCT
+  FAN_SPEED_PCT=$(echo "$CURRENT_FAN_CONTROL_PROFILE" | grep -Po '\d+(?=%)' | head -1)
+  # Dell default mode has no %, use 100 as sentinel
+  if [ -z "$FAN_SPEED_PCT" ]; then
+    FAN_SPEED_PCT=100
+  fi
+
+  local CPU2_VAL="${CPU2_TEMPERATURE:-}"
+  if ! [[ "$CPU2_VAL" =~ ^[0-9]+$ ]]; then
+    CPU2_VAL=""
+  fi
+
+  local EXHAUST_VAL="${EXHAUST_TEMPERATURE:-}"
+  if ! [[ "$EXHAUST_VAL" =~ ^[0-9]+$ ]]; then
+    EXHAUST_VAL=""
+  fi
+
+  echo "${TIMESTAMP},${INLET_TEMPERATURE},${CPU1_TEMPERATURE},${CPU2_VAL},${EXHAUST_VAL},${CURRENT_FAN_CONTROL_PROFILE},${FAN_SPEED_PCT}" >> "$LOG_FILE"
+
+  # Prune lines older than retention period (keep header)
+  local -r CUTOFF=$(date -d "-${RETENTION_DAYS} days" +"%Y-%m-%d %T" 2>/dev/null || date -v-${RETENTION_DAYS}d +"%Y-%m-%d %T")
+  awk -v cutoff="$CUTOFF" 'NR==1 || $0 >= cutoff' "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
+}
+
+# ---------------------------------------------------------------------------
 # STEPPED FAN CURVE
-# Requires env vars:
-#   FAN_SPEED                        - baseline fan % (low / cool)
-#   STEPPED_MID_TEMP                 - °C to switch to mid speed
-#   STEPPED_MID_FAN_SPEED            - fan % at mid stage
-#   STEPPED_HIGH_TEMP                - °C to switch to high speed
-#   STEPPED_HIGH_FAN_SPEED           - fan % at high stage
-#   CPU_TEMPERATURE_THRESHOLD        - °C to hand back to Dell
-#
-# Returns: sets CURRENT_FAN_CONTROL_PROFILE and applies the correct speed
 # ---------------------------------------------------------------------------
 function apply_stepped_fan_curve() {
-  local -r CPU_TEMP="$1"   # highest CPU temp to evaluate
+  local -r CPU_TEMP="$1"
 
   if [ "$CPU_TEMP" -ge "$CPU_TEMPERATURE_THRESHOLD" ]; then
     apply_Dell_default_fan_control_profile
@@ -263,15 +246,6 @@ function apply_stepped_fan_curve() {
 
 # ---------------------------------------------------------------------------
 # LINEAR INTERPOLATION FAN CURVE
-# Requires env vars:
-#   FAN_SPEED                        - minimum fan % (below INTERP_LOW_TEMP)
-#   INTERP_LOW_TEMP                  - °C where ramping begins
-#   INTERP_HIGH_TEMP                 - °C where ramping ends (= CPU_TEMPERATURE_THRESHOLD)
-#   INTERP_HIGH_FAN_SPEED            - maximum fan % at INTERP_HIGH_TEMP
-#   CPU_TEMPERATURE_THRESHOLD        - °C to hand back to Dell
-#
-# Between INTERP_LOW_TEMP and INTERP_HIGH_TEMP the fan speed is linearly
-# interpolated: speed = LOW + (HIGH-LOW) * (temp-LOW_TEMP)/(HIGH_TEMP-LOW_TEMP)
 # ---------------------------------------------------------------------------
 function apply_interpolated_fan_curve() {
   local -r CPU_TEMP="$1"
@@ -279,11 +253,9 @@ function apply_interpolated_fan_curve() {
   if [ "$CPU_TEMP" -ge "$CPU_TEMPERATURE_THRESHOLD" ]; then
     apply_Dell_default_fan_control_profile
   elif [ "$CPU_TEMP" -ge "$INTERP_LOW_TEMP" ]; then
-    # Integer arithmetic: multiply by 100 to preserve one decimal place then round
     local -r RANGE_TEMP=$(( INTERP_HIGH_TEMP - INTERP_LOW_TEMP ))
     local -r RANGE_SPEED=$(( INTERP_HIGH_FAN_SPEED - DECIMAL_FAN_SPEED ))
     local -r OFFSET=$(( CPU_TEMP - INTERP_LOW_TEMP ))
-    # Rounded integer division: (a + b/2) / b
     local -r INTERPOLATED_SPEED=$(( DECIMAL_FAN_SPEED + (RANGE_SPEED * OFFSET * 100 / RANGE_TEMP + 50) / 100 ))
     apply_user_fan_control_profile "$INTERPOLATED_SPEED"
     CURRENT_FAN_CONTROL_PROFILE="Interpolated fan curve ($INTERPOLATED_SPEED% @ ${CPU_TEMP}°C)"
@@ -294,12 +266,8 @@ function apply_interpolated_fan_curve() {
 }
 
 # ---------------------------------------------------------------------------
-# OVERHEATING checks — these now test against CPU_TEMPERATURE_THRESHOLD for
-# both modes. In stepped/interpolation modes the threshold is used as the
-# Dell hand-back point, handled inside the curve functions above.
+# OVERHEATING checks
 # ---------------------------------------------------------------------------
-
-# Define functions to check if CPU 1 and CPU 2 temperatures are above the threshold
 function CPU1_OVERHEATING() { [ $CPU1_TEMPERATURE -gt "$CPU_TEMPERATURE_THRESHOLD" ]; }
 function CPU2_OVERHEATING() { [ $CPU2_TEMPERATURE -gt "$CPU_TEMPERATURE_THRESHOLD" ]; }
 
