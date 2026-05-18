@@ -301,6 +301,33 @@ readonly HEADER=$(build_header $NUMBER_OF_DETECTED_CPUS)
 while true; do
   COMMENT=" -"
 
+  # ---------------------------------------------------------------------------
+  # Check for manual override flag file
+  # Created by pre-backup script, deleted by post-backup script
+  # File contains the desired fan speed % as a plain number e.g. "50"
+  # ---------------------------------------------------------------------------
+  OVERRIDE_FILE="${LOG_PATH}/fan_override"
+  if [ -f "$OVERRIDE_FILE" ]; then
+    OVERRIDE_SPEED=$(cat "$OVERRIDE_FILE" | tr -d '[:space:]')
+    if [[ "$OVERRIDE_SPEED" =~ ^[0-9]+$ ]]; then
+      apply_user_fan_control_profile "$OVERRIDE_SPEED"
+      CURRENT_FAN_CONTROL_PROFILE="Manual override (${OVERRIDE_SPEED}%)"
+      COMMENT="Override flag active - backup in progress"
+      log_to_csv
+      if [ $TABLE_HEADER_PRINT_COUNTER -eq $TABLE_HEADER_PRINT_INTERVAL ]; then
+        printf "%s\n" "$HEADER"
+        TABLE_HEADER_PRINT_COUNTER=0
+      fi
+      print_temperature_array_line "$INLET_TEMPERATURE" "$CPUS_TEMPERATURES" "$EXHAUST_TEMPERATURE" "$CURRENT_FAN_CONTROL_PROFILE" "$THIRD_PARTY_PCIE_CARD_DELL_DEFAULT_COOLING_RESPONSE_STATUS" "$COMMENT"
+      ((TABLE_HEADER_PRINT_COUNTER++))
+      wait $SLEEP_PROCESS_PID
+      sleep "$CHECK_INTERVAL" &
+      SLEEP_PROCESS_PID=$!
+      retrieve_temperatures $IS_EXHAUST_TEMPERATURE_SENSOR_PRESENT $IS_CPU2_TEMPERATURE_SENSOR_PRESENT
+      continue
+    fi
+  fi
+
   if $IS_CPU2_TEMPERATURE_SENSOR_PRESENT && [[ "$CPU2_TEMPERATURE" =~ ^[0-9]+$ ]]; then
     if [ "$CPU2_TEMPERATURE" -gt "$CPU1_TEMPERATURE" ]; then
       MAX_CPU_TEMPERATURE=$CPU2_TEMPERATURE
