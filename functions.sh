@@ -89,6 +89,24 @@ function retrieve_temperatures() {
   else
     EXHAUST_TEMPERATURE="-"
   fi
+
+  # Retrieve fan RPM data and calculate average
+  local -r FAN_DATA=$(ipmitool -I $IDRAC_LOGIN_STRING sdr type Fan 2>/dev/null | grep RPM | grep -Po '\d{3,5} RPM' | grep -Po '\d+')
+  if [ -n "$FAN_DATA" ]; then
+    local FAN_TOTAL=0
+    local FAN_COUNT=0
+    while IFS= read -r rpm; do
+      FAN_TOTAL=$(( FAN_TOTAL + rpm ))
+      (( FAN_COUNT++ ))
+    done <<< "$FAN_DATA"
+    if [ "$FAN_COUNT" -gt 0 ]; then
+      AVERAGE_FAN_RPM=$(( FAN_TOTAL / FAN_COUNT ))
+    else
+      AVERAGE_FAN_RPM=0
+    fi
+  else
+    AVERAGE_FAN_RPM=0
+  fi
 }
 
 # /!\ Use this function only for Gen 13 and older generation servers /!\
@@ -191,35 +209,53 @@ function print_temperature_array_line() {
 function log_to_csv() {
   local -r TIMESTAMP="$(date +"%Y-%m-%d %T")"
   local -r LOG_FILE="${LOG_PATH:-/app/logs}/fan_controller.csv"
+  local -r STATUS_FILE="${LOG_PATH:-/app/logs}/status.json"
   local -r RETENTION_DAYS="${LOG_RETENTION_DAYS:-365}"
 
-  # Create log dir and header if needed
   mkdir -p "$(dirname "$LOG_FILE")"
   if [ ! -f "$LOG_FILE" ]; then
-    echo "timestamp,inlet_temp,cpu1_temp,cpu2_temp,exhaust_temp,fan_profile,fan_speed_pct" > "$LOG_FILE"
+    echo "timestamp,inlet_temp,cpu1_temp,cpu2_temp,exhaust_temp,fan_profile,fan_speed_pct,avg_fan_rpm" > "$LOG_FILE"
   fi
 
-  # Extract numeric fan speed from profile string e.g. "Stepped fan curve - Mid stage (15% @ 43°C)" -> 15
   local FAN_SPEED_PCT
   FAN_SPEED_PCT=$(echo "$CURRENT_FAN_CONTROL_PROFILE" | grep -Po '\d+(?=%)' | head -1)
-  # Dell default mode has no %, use 100 as sentinel
   if [ -z "$FAN_SPEED_PCT" ]; then
     FAN_SPEED_PCT=100
   fi
 
   local CPU2_VAL="${CPU2_TEMPERATURE:-}"
-  if ! [[ "$CPU2_VAL" =~ ^[0-9]+$ ]]; then
-    CPU2_VAL=""
-  fi
+  if ! [[ "$CPU2_VAL" =~ ^[0-9]+$ ]]; then CPU2_VAL=""; fi
 
   local EXHAUST_VAL="${EXHAUST_TEMPERATURE:-}"
-  if ! [[ "$EXHAUST_VAL" =~ ^[0-9]+$ ]]; then
-    EXHAUST_VAL=""
+  if ! [[ "$EXHAUST_VAL" =~ ^[0-9]+$ ]]; then EXHAUST_VAL=""; fi
+
+  local RPM_VAL="${AVERAGE_FAN_RPM:-0}"
+
+  # Check if override is active
+  local OVERRIDE_ACTIVE="false"
+  if [ -f "${LOG_PATH:-/app/logs}/fan_override" ]; then
+    OVERRIDE_ACTIVE="true"
   fi
 
-  echo "${TIMESTAMP},${INLET_TEMPERATURE},${CPU1_TEMPERATURE},${CPU2_VAL},${EXHAUST_VAL},${CURRENT_FAN_CONTROL_PROFILE},${FAN_SPEED_PCT}" >> "$LOG_FILE"
+  echo "${TIMESTAMP},${INLET_TEMPERATURE},${CPU1_TEMPERATURE},${CPU2_VAL},${EXHAUST_VAL},${CURRENT_FAN_CONTROL_PROFILE},${FAN_SPEED_PCT},${RPM_VAL}" >> "$LOG_FILE"
 
-  # Prune lines older than retention period (keep header)
+  # Write current status JSON for dashboard plugin
+  cat > "$STATUS_FILE" << JSONEOF
+{
+  "timestamp": "${TIMESTAMP}",
+  "inlet_temp": ${INLET_TEMPERATURE},
+  "cpu1_temp": ${CPU1_TEMPERATURE},
+  "cpu2_temp": "${CPU2_VAL}",
+  "exhaust_temp": "${EXHAUST_VAL}",
+  "fan_profile": "${CURRENT_FAN_CONTROL_PROFILE}",
+  "fan_speed_pct": ${FAN_SPEED_PCT},
+  "avg_fan_rpm": ${RPM_VAL},
+  "override_active": ${OVERRIDE_ACTIVE},
+  "server_model": "${SERVER_MODEL:-}"
+}
+JSONEOF
+
+  # Prune old entries
   local -r CUTOFF=$(date -d "-${RETENTION_DAYS} days" +"%Y-%m-%d %T" 2>/dev/null || date -v-${RETENTION_DAYS}d +"%Y-%m-%d %T")
   awk -v cutoff="$CUTOFF" 'NR==1 || $0 >= cutoff' "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
 }
